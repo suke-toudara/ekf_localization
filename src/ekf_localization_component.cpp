@@ -71,9 +71,6 @@ bool ExtendedKalmanFilterComponent::init()
 {
   if (Y(0) != 0 && u(0) != 0) {
     X << Y(0), Y(1), Y(2), 0, 0, 0, 1, 0, 0, 0;
-    double P_x = 1;
-    P = Matrix3d::Identity();
-
     initialized = true;
   } else {
     initialized = false;
@@ -82,13 +79,20 @@ bool ExtendedKalmanFilterComponent::init()
 }
 
 
-void ExtendedKalmanFilterComponent::imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg)
+void ExtendedKalmanFilterComponent::odom_callback(nav_msgs::msg::Odometry::SharedPtr msg)
 {
+  measurementUpdate(msg);
+}
+
+
+void EKFComponent::IMUtopic_callback(const sensor_msgs::msg::Imu::SharedPtr msg)
+{
+  //
+
   if (initial_pose_recieved_) {
     sensor_msgs::msg::Imu transformed_msg;
     try {
-      geometry_msgs::msg::Vector3S
-      tamped acc_in, acc_out, w_in, w_out;
+      geometry_msgs::msg::Vector3Stamped acc_in, acc_out, w_in, w_out;
       acc_in.vector.x = msg->linear_acceleration.x;
       acc_in.vector.y = msg->linear_acceleration.y;
       acc_in.vector.z = msg->linear_acceleration.z;
@@ -121,42 +125,6 @@ void ExtendedKalmanFilterComponent::imu_callback(const sensor_msgs::msg::Imu::Sh
       return;
     }
   }
-};
-
-auto odom_callback =
-  [this](const typename nav_msgs::msg::Odometry::SharedPtr msg) -> void
-  {
-    if (initial_pose_recieved_ && use_odom_) {
-      Eigen::Affine3d affine;
-      tf2::fromMsg(msg->pose.pose, affine);
-      Eigen::Matrix4d odom_mat = affine.matrix();
-      if (previous_odom_mat_ == Eigen::Matrix4d::Identity()) {
-        current_pose_odom_ = current_pose_;
-        previous_odom_mat_ = odom_mat;
-        return;
-      }
-
-      Eigen::Affine3d current_affine;
-      tf2::fromMsg(current_pose_odom_.pose, current_affine);
-      Eigen::Matrix4d current_trans = current_affine.matrix();
-      current_trans = current_trans * previous_odom_mat_.inverse() * odom_mat;
-
-      geometry_msgs::msg::PoseStamped pose;
-      pose.header = msg->header;
-      pose.pose.position.x = current_trans(0, 3);
-      pose.pose.position.y = current_trans(1, 3);
-      pose.pose.position.z = current_trans(2, 3);
-      measurementUpdate(pose, var_odom_);
-
-      current_pose_odom_ = current_pose_;
-      previous_odom_mat_ = odom_mat;
-    }
-  };
-
-
-void ExtendedKalmanFilterComponent::odom_callback(const gnav_msgs::msg::Odometry::SharedPtr msg)
-{
-    z << msg->twist.twist.linear.x, msg->twist.twist.angular.z;
 }
 
 void ExtendedKalmanFilterComponent::step()
@@ -189,14 +157,17 @@ void ExtendedKalmanFilterComponent::step()
   }
 }
 
-void ExtendedKalmanFilterComponent::predict(const Vector2d& u)
+void ExtendedKalmanFilterComponent::predictUpdate(nav_msgs::msg::Odometry::SharedPtr msg)
 {
+  if (!initialized) {
+    init();
+  } else {
     // 予測ステップ
     /*
     ------------------------------
-    1.運動方程式　　 : xPred = motion_model(xEst, u)
+    1.運動方程式　　 : X_Pred = motion_model(xEst, u)
     2.ヤコビアン計算 : jF = jacobF(xPred, u)
-    PPred = jF * PEst * jF.T + Q
+    3.事前誤差共分散行列の推定 : PPred = jF * PEst * jF.T + Q
     ------------------------------
     F:ヤコビアン(運動方程式の)
     P:事前誤差共分散行列
@@ -204,34 +175,25 @@ void ExtendedKalmanFilterComponent::predict(const Vector2d& u)
     ------------------------------
     */
 
-    double dt = 0; //(stamp - prev_stamp).seconds();
-    prev_stamp = stamp;
-
-    double l = 1.0; // 車輪間距離 (単位: m)
-
-    // 状態遷移関数
-    double x = X(0), y = X(1), theta = X(2);
-    double dl = u(0), dr = u(1); // 左右車輪の回転量
-    double dx = (dl + dr) / 2 * cos(theta);
-    double dy = (dl + dr) / 2 * sin(theta);
-    double dtheta = (dr - dl) / l;
-
-    Vector3d X_pred;
     //1.運動モデルによる予測(事前推定値)
-    X_pred << x + dx * dt, y + dy * dt, theta + dtheta * dt;
-
-    //2.ヤコビアン計算(正解)
-    Matrix3d G;
-    G << 1, 0, -(dl + dr) / 2 * sin(theta) * dt,
-            0, 1, (dl + dr) / 2 * cos(theta) * dt,
-            0, 0, 1;
+    odomtimestamp = msg->header.stamp;
+    X(0) = msg->pose.pose.position.x;
+    X(1) = msg->pose.pose.position.y;
+    X(2) = msg->pose.pose.position.z;
+    double v = msg->twist.twist.linear.z;
+    double theta = msg->twist.twist.angle.z;
+    //2.ヤコビアン計算
+    Matrix3d F;
+    F << 1, 0, -v*sin(theta)*dt_ ,
+         0, 1,  v*cos(theta)*dt_ ,
+         0, 0, 1;
 
     //3.事前誤差共分散行列の推定
-    P = (1 - G * P) * G.transpose() + R;
-    X = X_pred;
+    P_ = F * P_ * F.transpose() + Q_;
+  }
 }
 
-void ExtendedKalmanFilterComponent::update(const Vector3d& z)
+void ExtendedKalmanFilterComponent::measurementUpdatepredictUpdate(const Vector3d& z)
 {   
     /*
     Update : 観測後の信念分布の更新
@@ -240,35 +202,28 @@ void ExtendedKalmanFilterComponent::update(const Vector3d& z)
     3.カルマンゲインの計算 :
     4.状態と共分散の更新　 :
     */
-
-    // 経過時間の計算 (今回は使用しないが、将来的に必要かもしれない)
-    double dt = 0; //(stamp - prev_stamp).seconds();
-    prev_stamp = stamp;
-
-    //カルマンゲイン計算
-    Matrix3d K = P * Hx.transpose() * (Hx * P * Hx.transpose() + Q).inverse();
-
-    // 更新ステップ
-    Vector3d Y;
+    double v += u(0)
     double x = X(0), y = X(1), theta = X(2);
-    double dl = z(0), dr = z(1); // 左右車輪の回転量
-    double dx = (dl + dr) / 2 * cos(theta);
-    double dy = (dl + dr) / 2 * sin(theta);
-    double dtheta = (dr - dl) / l;
-    Vector3d Y_pred;
-    Y_pred << x + dx * dt, y + dy * dt, theta + dtheta * dt;
+    double dx = v*cos(theta);
+    double dy = v*sin(theta);
+    double dtheta =u(5);
+    Y = 0;
+    //予測値と観測値の誤差
+    VectorXd y = z - H * x_;
 
-    // ヤコビアン計算
-    Matrix3d Hx;
-    Hx << 1, 0, 0,
-        0, 1, 0,
-        0, 0, 1;
+    // Innovation covariance
+    MatrixXd S = H * P_ * H.transpose() + R;
+    //カルマンゲイン計算
+    MatrixXd K = P_ * H.transpose() * S.inverse();
 
+    // Correct the state
+    X_ = X_ + K * y;
+    
     //状態推定値(事後信念bel(xt)の平均µtを計算) x_kalman = X_model + k*(Y_obserb-X_model)
-    X = X + K * (X - Y);
+    X = X + (1 - K) * Y;
     
     //事後誤差共分散行列(事後信念bel(xt)の共分散行列Σtを計算)
-    P = (Matrix3d::Identity() - K * Hx) * P;
+    P = (Matrix3d::Identity() - G * H) * P;
 }
 
 #include <rclcpp_components/register_node_macro.hpp>
