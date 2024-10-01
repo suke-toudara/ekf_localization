@@ -5,7 +5,7 @@ int main(int argc, char * argv[])
 {
   rclcpp::init(argc, argv);
   rclcpp::NodeOptions options;
-  auto component = std::make_shared<ekf_localization::ExtendedKalmanFilterComponent>(options);
+  auto component = std::make_shared<ekf_localization::ExtendedKalmanFilter>(options);
   rclcpp::spin(component);
   rclcpp::shutdown();
   return 0;
