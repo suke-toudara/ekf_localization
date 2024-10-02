@@ -13,6 +13,7 @@
   <depend>rclcpp_components</depend>
   <depend>eigen</depend>
   <depend>sensor_msgs</depend>
+  <build_depend>tf2_ros</build_depend>
   <build_depend>nav_msgs</build_depend>
   
   <exec_depend>launch_ros</exec_depend>
