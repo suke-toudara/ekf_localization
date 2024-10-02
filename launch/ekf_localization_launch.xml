@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<launch>
+  <node_container pkg="rclcpp_components" exec="component_container" name="ekf_localization_container" namespace="ekf_localization" >
+    <composable_node pkg="ekf_localization" plugin="ekf_localization::ExtendedKalmanFilter" name="ekf_localization_node" namespace="ekf_localization">
+      <param from="$(find-pkg-share ekf_localization)/config/ekf.yaml" />
+    </composable_node>
+  </node_container>
+</launch>

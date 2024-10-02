@@ -17,13 +17,15 @@ ExtendedKalmanFilter::ExtendedKalmanFilter(const rclcpp::NodeOptions & options)
   declare_parameter("ekf_pose_topic","/estimated_pose");
   declare_parameter("imu_topic","/imu");
   declare_parameter("odom_topic","/odom");
-
+  declare_parameter("broadcast_transform", true);
+  
   get_parameter("map_frame_id", map_frame_id_);
   get_parameter("robot_frame_id", robot_frame_id_);
   get_parameter("initial_pose_topic", initial_pose_topic_);
   get_parameter("ekf_pose_topic", ekf_pose_topic_);
   get_parameter("imu_topic", imu_topic_);
   get_parameter("odom_topic", odom_topic_);
+  get_parameter("broadcast_transform", broadcast_transform_);
 
   declare_parameter("var_imu_w", 0.1);
   declare_parameter("var_imu_acc", 0.01);
@@ -35,7 +37,6 @@ ExtendedKalmanFilter::ExtendedKalmanFilter(const rclcpp::NodeOptions & options)
   // declare_parameter("pub_period", 10);
   // get_parameter("pub_period", pub_period_);
   
-
   // publisher
   ekf_pose_publisher_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("/estimated_pose", 10);
 
@@ -88,8 +89,8 @@ void ExtendedKalmanFilter::imu_callback(const sensor_msgs::msg::Imu & msg)
   if (!initialized) {
     init();
   } else {
-    // sensor_msgs::msg::Imu transformed_msg;
-    // try {
+    sensor_msgs::msg::Imu transformed_msg;
+    try {
       // geometry_msgs::msg::Vector3Stamped acc_in, acc_out, w_in, w_out;
       // acc_in.vector.x = msg->linear_acceleration.x;
       // acc_in.vector.y = msg->linear_acceleration.y;
@@ -114,15 +115,15 @@ void ExtendedKalmanFilter::imu_callback(const sensor_msgs::msg::Imu & msg)
       // transformed_msg.linear_acceleration.x = acc_out.vector.x;
       // transformed_msg.linear_acceleration.y = acc_out.vector.y;
       // transformed_msg.linear_acceleration.z = acc_out.vector.z;
-    sensor_msgs::msg::Imu imu_msg = msg; 
-    measurementUpdate(imu_msg);
+      sensor_msgs::msg::Imu imu_msg = msg; 
+      measurementUpdate(imu_msg);
     // } catch (tf2::TransformException & e) {
     //   RCLCPP_ERROR(this->get_logger(), "%s", e.what());
     //   return;
-    // } catch (std::runtime_error & e) {
-    //   RCLCPP_ERROR(this->get_logger(), "%s", e.what());
-    //   return;
-    // }
+    } catch (std::runtime_error & e) {
+      RCLCPP_ERROR(this->get_logger(), "%s", e.what());
+      return;
+    }
   }
 }
 
