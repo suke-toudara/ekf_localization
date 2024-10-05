@@ -9,7 +9,11 @@ using namespace Eigen;
 namespace ekf_localization
 {
 ExtendedKalmanFilter::ExtendedKalmanFilter(const rclcpp::NodeOptions & options)
-: Node("extended_kalman_filter", options), broadcaster_(this)
+: Node("extended_kalman_filter", options),
+  clock_(RCL_ROS_TIME),
+  tfbuffer_(std::make_shared<rclcpp::Clock>(clock_)),
+  listener_(tfbuffer_),
+  broadcaster_(this)
 {
   declare_parameter("map_frame_id", "map");
   declare_parameter("robot_frame_id", "base_link");
@@ -37,6 +41,9 @@ ExtendedKalmanFilter::ExtendedKalmanFilter(const rclcpp::NodeOptions & options)
   // declare_parameter("pub_period", 10);
   // get_parameter("pub_period", pub_period_);
   
+  auto qos = rclcpp::QoS(rclcpp::QoSInitialization::from_rmw(rmw_qos_profile_sensor_data));
+  qos.best_effort(); 
+  
   // publisher
   ekf_pose_publisher_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("/estimated_pose", 10);
 
@@ -46,7 +53,7 @@ ExtendedKalmanFilter::ExtendedKalmanFilter(const rclcpp::NodeOptions & options)
       odom_callback(msg);
       });
   imu_subscription_ = create_subscription<sensor_msgs::msg::Imu>(
-      imu_topic_, 10, [this](const sensor_msgs::msg::Imu & msg) {
+      imu_topic_, qos, [this](const sensor_msgs::msg::Imu & msg) {
       imu_callback(msg);
       });
   
@@ -63,6 +70,8 @@ ExtendedKalmanFilter::ExtendedKalmanFilter(const rclcpp::NodeOptions & options)
   R(0, 0) = var_imu_w_;   // Process noise for x
   R(1, 1) = var_imu_w_;   // Process noise for y
   R(2, 2) = var_imu_acc_; // Process noise for theta
+
+  prev_time_ = this->now();
 }
 
 
@@ -91,35 +100,34 @@ void ExtendedKalmanFilter::imu_callback(const sensor_msgs::msg::Imu & msg)
   } else {
     sensor_msgs::msg::Imu transformed_msg;
     try {
-      // geometry_msgs::msg::Vector3Stamped acc_in, acc_out, w_in, w_out;
-      // acc_in.vector.x = msg->linear_acceleration.x;
-      // acc_in.vector.y = msg->linear_acceleration.y;
-      // acc_in.vector.z = msg->linear_acceleration.z;
-      // w_in.vector.x = msg->angular_velocity.x;
-      // w_in.vector.y = msg->angular_velocity.y;
-      // w_in.vector.z = msg->angular_velocity.z;
-      // tf2::TimePoint time_point = tf2::TimePoint(
-      //   std::chrono::seconds(msg->header.stamp.sec) +
-      //   std::chrono::nanoseconds(msg->header.stamp.nanosec));
-      // const geometry_msgs::msg::TransformStamped transform =
-      //   tfbuffer_.lookupTransform(
-      //   robot_frame_id_,
-      //   msg->header.frame_id,
-      //   time_point);
-      // tf2::doTransform(acc_in, acc_out, transform);
-      // tf2::doTransform(w_in, w_out, transform);
-      // transformed_msg.header.stamp = msg->header.stamp;
-      // transformed_msg.angular_velocity.x = w_out.vector.x;
-      // transformed_msg.angular_velocity.y = w_out.vector.y;
-      // transformed_msg.angular_velocity.z = w_out.vector.z;
-      // transformed_msg.linear_acceleration.x = acc_out.vector.x;
-      // transformed_msg.linear_acceleration.y = acc_out.vector.y;
-      // transformed_msg.linear_acceleration.z = acc_out.vector.z;
-      sensor_msgs::msg::Imu imu_msg = msg; 
-      measurementUpdate(imu_msg);
-    // } catch (tf2::TransformException & e) {
-    //   RCLCPP_ERROR(this->get_logger(), "%s", e.what());
-    //   return;
+      geometry_msgs::msg::Vector3Stamped acc_in, acc_out, w_in, w_out;
+      acc_in.vector.x = msg.linear_acceleration.x;
+      acc_in.vector.y = msg.linear_acceleration.y;
+      acc_in.vector.z = msg.linear_acceleration.z;
+      w_in.vector.x = msg.angular_velocity.x;
+      w_in.vector.y = msg.angular_velocity.y;
+      w_in.vector.z = msg.angular_velocity.z;
+      tf2::TimePoint time_point = tf2::TimePoint(
+        std::chrono::seconds(msg.header.stamp.sec) +
+        std::chrono::nanoseconds(msg.header.stamp.nanosec));
+      const geometry_msgs::msg::TransformStamped transform =
+        tfbuffer_.lookupTransform(
+        robot_frame_id_,
+        msg.header.frame_id,
+        time_point);
+      tf2::doTransform(acc_in, acc_out, transform);
+      tf2::doTransform(w_in, w_out, transform);
+      transformed_msg.header.stamp = msg.header.stamp;
+      transformed_msg.angular_velocity.x = w_out.vector.x;
+      transformed_msg.angular_velocity.y = w_out.vector.y;
+      transformed_msg.angular_velocity.z = w_out.vector.z;
+      transformed_msg.linear_acceleration.x = acc_out.vector.x;
+      transformed_msg.linear_acceleration.y = acc_out.vector.y;
+      transformed_msg.linear_acceleration.z = acc_out.vector.z; 
+      measurementUpdate(transformed_msg);
+    } catch (tf2::TransformException & e) {
+      RCLCPP_ERROR(this->get_logger(), "%s", e.what());
+      return;
     } catch (std::runtime_error & e) {
       RCLCPP_ERROR(this->get_logger(), "%s", e.what());
       return;

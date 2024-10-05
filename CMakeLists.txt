@@ -13,13 +13,18 @@ endif()
 
 
 find_package(ament_cmake_auto REQUIRED)
+find_package(Eigen3 REQUIRED)
+
 ament_auto_find_build_dependencies()
 ament_auto_add_library(ekf_localization_component SHARED
  src/ekf_localization_component.cpp)
 
 rclcpp_components_register_nodes(ekf_localization_component
-"ekf_localization::ExtendedKalmanFilterComponent"
+"ekf_localization::ExtendedKalmanFilter"
 )
+
+target_link_libraries(ekf_localization_component Eigen3::Eigen)
+
 
 install(
   DIRECTORY "include/"
@@ -31,10 +36,17 @@ if(BUILD_TESTING)
   ament_lint_auto_find_test_dependencies()
 endif()
 
-ament_auto_package(
-  INSTALL_TO_SHARE
+install(DIRECTORY
   launch
   config
+  DESTINATION share/${PROJECT_NAME}/
+)
+
+
+ament_auto_package(
+  # INSTALL_TO_SHARE
+  # launch
+  # config
 )
 
 install(FILES DESTINATION share/${PROJECT_NAME})
