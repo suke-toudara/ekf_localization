@@ -30,7 +30,6 @@ private:
   bool initialized = false;
 
   float v;
-  float theta;
   Eigen::Vector3d X; 
   Eigen::Vector3d Z; 
 

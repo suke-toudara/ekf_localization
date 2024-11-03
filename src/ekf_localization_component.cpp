@@ -53,13 +53,13 @@ ExtendedKalmanFilter::ExtendedKalmanFilter(const rclcpp::NodeOptions & options)
       odom_callback(msg);
       });
   imu_subscription_ = create_subscription<sensor_msgs::msg::Imu>(
-      imu_topic_, qos, [this](const sensor_msgs::msg::Imu & msg) {
+      imu_topic_, 10, [this](const sensor_msgs::msg::Imu & msg) {
       imu_callback(msg);
       });
   
-  P(0, 0) = 0;  
-  P(1, 1) = 0;  
-  P(2, 2) = 0;  
+  P(0, 0) = 0.1;  
+  P(1, 1) = 0.1;  
+  P(2, 2) = 0.1;  
   
   // プロセスノイズ共分散行列
   Q(0, 0) = var_odom_xyz_;  // Process noise for x
@@ -70,8 +70,6 @@ ExtendedKalmanFilter::ExtendedKalmanFilter(const rclcpp::NodeOptions & options)
   R(0, 0) = var_imu_w_;   // Process noise for x
   R(1, 1) = var_imu_w_;   // Process noise for y
   R(2, 2) = var_imu_acc_; // Process noise for theta
-
-  prev_time_ = this->now();
 }
 
 
@@ -79,6 +77,7 @@ void ExtendedKalmanFilter::init()
 {
   X << 0, 0, 0;
   initialized = true;
+  prev_time_ = this->now();
 }
 
 
@@ -92,21 +91,26 @@ void ExtendedKalmanFilter::odom_callback(const nav_msgs::msg::Odometry & msg)
   }
 }
 
-
 void ExtendedKalmanFilter::imu_callback(const sensor_msgs::msg::Imu & msg)
 {
   if (!initialized) {
     init();
   } else {
-    sensor_msgs::msg::Imu transformed_msg;
+    // measurementUpdate(msg);
     try {
+      sensor_msgs::msg::Imu transformed_msg;
       geometry_msgs::msg::Vector3Stamped acc_in, acc_out, w_in, w_out;
+      geometry_msgs::msg::QuaternionStamped orientation_in, orientation_out;
+
       acc_in.vector.x = msg.linear_acceleration.x;
       acc_in.vector.y = msg.linear_acceleration.y;
       acc_in.vector.z = msg.linear_acceleration.z;
       w_in.vector.x = msg.angular_velocity.x;
       w_in.vector.y = msg.angular_velocity.y;
       w_in.vector.z = msg.angular_velocity.z;
+      orientation_in.quaternion = msg.orientation; 
+      orientation_in.header = msg.header; 
+
       tf2::TimePoint time_point = tf2::TimePoint(
         std::chrono::seconds(msg.header.stamp.sec) +
         std::chrono::nanoseconds(msg.header.stamp.nanosec));
@@ -117,6 +121,8 @@ void ExtendedKalmanFilter::imu_callback(const sensor_msgs::msg::Imu & msg)
         time_point);
       tf2::doTransform(acc_in, acc_out, transform);
       tf2::doTransform(w_in, w_out, transform);
+      tf2::doTransform(orientation_in, orientation_out, transform); //追加
+
       transformed_msg.header.stamp = msg.header.stamp;
       transformed_msg.angular_velocity.x = w_out.vector.x;
       transformed_msg.angular_velocity.y = w_out.vector.y;
@@ -124,6 +130,8 @@ void ExtendedKalmanFilter::imu_callback(const sensor_msgs::msg::Imu & msg)
       transformed_msg.linear_acceleration.x = acc_out.vector.x;
       transformed_msg.linear_acceleration.y = acc_out.vector.y;
       transformed_msg.linear_acceleration.z = acc_out.vector.z; 
+      transformed_msg.orientation = orientation_out.quaternion; //追加
+
       measurementUpdate(transformed_msg);
     } catch (tf2::TransformException & e) {
       RCLCPP_ERROR(this->get_logger(), "%s", e.what());
@@ -157,20 +165,29 @@ void ExtendedKalmanFilter::predictUpdate(const nav_msgs::msg::Odometry & msg)
   rclcpp::Duration duration = odomtimestamp - prev_time_;
   double dt = duration.seconds(); 
   prev_time_ = odomtimestamp;
+  v = msg.twist.twist.linear.x;
+  
+  tf2::Quaternion q(
+            msg.pose.pose.orientation.x,
+            msg.pose.pose.orientation.y,
+            msg.pose.pose.orientation.z,
+            msg.pose.pose.orientation.w
+  );
+  tf2::Matrix3x3 m(q);
+  double roll, pitch, yaw;
+  m.getRPY(roll, pitch, yaw);
   X(0) = msg.pose.pose.position.x;
   X(1) = msg.pose.pose.position.y;
-  X(2) = msg.pose.pose.position.z;
-  v = msg.twist.twist.linear.z;
-  theta = msg.twist.twist.angular.z;
+  X(2) = yaw;
+
   //2.ヤコビアン計算
   Matrix3d F;
-  F << 1, 0, -v*sin(theta)*dt ,
-        0, 1,  v*cos(theta)*dt ,
+  F << 1, 0, -v*sin(yaw)*dt ,
+        0, 1,  v*cos(yaw)*dt ,
         0, 0, 1;
 
   //3.事前誤差共分散行列の推定
   P = F * P * F.transpose() + Q;
-
 }
 
 void ExtendedKalmanFilter::measurementUpdate(const sensor_msgs::msg::Imu & msg)
@@ -189,20 +206,29 @@ void ExtendedKalmanFilter::measurementUpdate(const sensor_msgs::msg::Imu & msg)
   rclcpp::Duration duration = imutimestamp - prev_time_;
   double dt = duration.seconds(); 
   prev_time_ = imutimestamp;
-
+  double x = X(0), y = X(1);
   v += msg.linear_acceleration.x*dt;
-  double x = X(0), y = X(1), theta = X(2);
-  double dx = v*cos(theta);
-  double dy = v*sin(theta);
-  double dtheta = msg.angular_velocity.z;
+  tf2::Quaternion q_imu(
+            msg.orientation.x,
+            msg.orientation.y,
+            msg.orientation.z,
+            msg.orientation.w
+  );
+  tf2::Matrix3x3 m(q_imu);
+  double roll, pitch, yaw;
+  m.getRPY(roll, pitch, yaw);
+
+  double dx = v*cos(yaw);
+  double dy = v*sin(yaw);
+
   Z(0) = x + dx * dt;
   Z(1) = y + dy * dt;
-  Z(2) = theta + dtheta * dt;
+  Z(2) = yaw;
 
   //2.観測ヤコビアンの計算
   Matrix3d H;
-  H << 1, 0, -v*sin(theta)*dt ,
-        0, 1,  v*cos(theta)*dt ,
+  H << 1, 0, -v*sin(yaw)*dt ,
+        0, 1,  v*cos(yaw)*dt ,
         0, 0, 1;
 
   //3.観測予測値の計算
@@ -222,18 +248,25 @@ void ExtendedKalmanFilter::measurementUpdate(const sensor_msgs::msg::Imu & msg)
   pose_ekf.header.frame_id = map_frame_id_;
   pose_ekf.pose.pose.position.x = X(0);
   pose_ekf.pose.pose.position.y = X(1);
-  pose_ekf.pose.pose.position.z = X(2);
+  pose_ekf.pose.pose.position.z = 0;
 
-  // pose_ekf.pose.pose.orientation.w =;
-  // pose_ekf.pose.pose.orientation.x =;
-  // pose_ekf.pose.pose.orientation.y =;
-  // pose_ekf.pose.pose.orientation.z =;
+  tf2::Quaternion q;
+  q.setRPY(0, 0, X(2)); 
+  q.normalize(); 
 
-  pose_ekf.pose.covariance = {
-    P(0, 0), P(0, 1), P(0, 2),
-    P(1, 0), P(1, 1), P(1, 2),
-    P(2, 0), P(2, 1), P(2, 2),
-  };
+  pose_ekf.pose.pose.orientation.w = q.w();
+  pose_ekf.pose.pose.orientation.x = q.x();
+  pose_ekf.pose.pose.orientation.y = q.y();
+  pose_ekf.pose.pose.orientation.z = q.z();
+
+  // pose_ekf.pose.covariance = {
+  //   P(0, 0), P(0, 1), 0, 0, 0, P(0, 2),
+  //   P(1, 0), P(1, 1), 0, 0, 0, P(1, 2),
+  //   0,       0,       0, 0, 0, 0,
+  //   0,       0,       0, 0, 0, 0,
+  //   0,       0,       0, 0, 0, 0,
+  //   P(2, 0), P(2, 1), 0, 0, 0, P(2, 2),
+  // };
   ekf_pose_publisher_->publish(pose_ekf);
 
   if (broadcast_transform_) {
