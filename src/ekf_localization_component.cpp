@@ -239,7 +239,7 @@ void ExtendedKalmanFilter::measurementUpdate(const sensor_msgs::msg::Imu & msg)
   MatrixXd S = H * P * H.transpose() + R;
   MatrixXd K = P * H.transpose() * S.inverse();
   //3.観測予測値の計算
-  X = X + K * Y;
+  X = (1- K) * X + K * Y;　//X + K * Y;
   P = (Matrix3d::Identity() - K * H) * P;
 
   // publish pose_ekf
