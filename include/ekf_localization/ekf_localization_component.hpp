@@ -27,8 +27,6 @@ public:
   explicit ExtendedKalmanFilter(const rclcpp::NodeOptions & options);
 
 private:
-  bool initialized = false;
-
   float v;
   Eigen::Vector3d X; 
   Eigen::Vector3d Z; 
@@ -36,10 +34,10 @@ private:
   // noise_pram
   float var_imu_w_;
   float var_imu_acc_;
-  float var_odom_xyz_;
-  MatrixXd Q = MatrixXd::Zero(3, 3);
-  MatrixXd R = MatrixXd::Zero(3, 3);
-
+  float var_odom_xyz_ = 0.05;
+  MatrixXd Q_wheel_ = MatrixXd::Zero(3, 3);;
+  MatrixXd R_ndt_ = MatrixXd::Zero(3, 3);
+  MatrixXd R_imu_ = MatrixXd::Zero(3, 3);
   // 共分散行列
   MatrixXd P = MatrixXd::Zero(3, 3);
 
@@ -48,11 +46,15 @@ private:
   rclcpp::Time imutimestamp;
 
   void init();
-  void odom_callback(const nav_msgs::msg::Odometry & msg);
+  void init(double x, double y, double theta);  // オーバーロード
+  void initial_pose_callback(const geometry_msgs::msg::PoseWithCovarianceStamped & msg);
+  void wheel_odom_callback(const nav_msgs::msg::Odometry & msg);
+  void ndt_odom_callback(const nav_msgs::msg::Odometry & msg);
   void imu_callback(const sensor_msgs::msg::Imu & msg);
  
   void predictUpdate(const nav_msgs::msg::Odometry & msg);
   void measurementUpdate(const sensor_msgs::msg::Imu & msg);
+  void ekf_timer_callback();  // タイマーコールバック関数
   
   rclcpp::Clock clock_;
   tf2_ros::Buffer tfbuffer_;
@@ -67,8 +69,26 @@ private:
   std::string ekf_pose_topic_;
   std::string imu_topic_;
   std::string odom_topic_;
-  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_subscription_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr wheel_odom_subscription_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr ndt_odom_subscription_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_subscription_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initial_pose_subscription_;
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr ekf_pose_publisher_;
+  
+  // タイマー関連
+  rclcpp::TimerBase::SharedPtr ekf_timer_;
+  double ekf_frequency_;
+  
+  // 最新のセンサーデータを保存
+  nav_msgs::msg::Odometry latest_wheel_odom_msg_;
+  nav_msgs::msg::Odometry latest_ndt_odom_msg_;
+  sensor_msgs::msg::Imu latest_imu_msg_;
+  bool wheel_odom_init_;
+  bool ndt_odom_init_;
+  bool imu_init_;
+
+  bool used_imu_;
+  bool used_ndt_;
+  bool used_wheel_;
 };
 }  // namespace 

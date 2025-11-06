@@ -34,13 +34,18 @@ ExtendedKalmanFilter::ExtendedKalmanFilter(const rclcpp::NodeOptions & options)
   declare_parameter("var_imu_w", 0.1);
   declare_parameter("var_imu_acc", 0.01);
   declare_parameter("var_odom_xyz", 0.1);
+  declare_parameter("ekf_frequency", 50.0);  // EKFの更新周波数 (Hz)
   get_parameter("var_imu_w", var_imu_w_);
   get_parameter("var_imu_acc", var_imu_acc_);
   get_parameter("var_odom_xyz", var_odom_xyz_);
+  get_parameter("ekf_frequency", ekf_frequency_);
  
   // declare_parameter("pub_period", 10);
   // get_parameter("pub_period", pub_period_);
-  
+
+
+  init();
+
   auto qos = rclcpp::QoS(rclcpp::QoSInitialization::from_rmw(rmw_qos_profile_sensor_data));
   qos.best_effort(); 
   
@@ -48,14 +53,33 @@ ExtendedKalmanFilter::ExtendedKalmanFilter(const rclcpp::NodeOptions & options)
   ekf_pose_publisher_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("/estimated_pose", 10);
 
   // subscriber
-  odom_subscription_ = create_subscription<nav_msgs::msg::Odometry>(
+  wheel_odom_subscription_ = create_subscription<nav_msgs::msg::Odometry>(
       odom_topic_, 10, [this](const nav_msgs::msg::Odometry & msg) {
-      odom_callback(msg);
+      wheel_odom_callback(msg);
       });
+
+  ndt_odom_subscription_ = create_subscription<nav_msgs::msg::Odometry>(
+      odom_topic_, 10, [this](const nav_msgs::msg::Odometry & msg) {
+      ndt_odom_callback(msg);
+      });
+
   imu_subscription_ = create_subscription<sensor_msgs::msg::Imu>(
       imu_topic_, 10, [this](const sensor_msgs::msg::Imu & msg) {
       imu_callback(msg);
       });
+
+  initial_pose_subscription_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
+      initial_pose_topic_, 10, [this](const geometry_msgs::msg::PoseWithCovarianceStamped & msg) {
+      initial_pose_callback(msg);
+      });
+
+  // タイマーの設定
+  auto timer_period = std::chrono::milliseconds(static_cast<int>(1000.0 / ekf_frequency_));
+  ekf_timer_ = this->create_wall_timer(timer_period, std::bind(&ExtendedKalmanFilter::ekf_timer_callback, this));
+
+  // データフラグの初期化
+  has_odom_data_ = false;
+  has_imu_data_ = false;
   
   P(0, 0) = 0.1;  
   P(1, 1) = 0.1;  
@@ -67,82 +91,118 @@ ExtendedKalmanFilter::ExtendedKalmanFilter(const rclcpp::NodeOptions & options)
   Q(2, 2) = var_odom_xyz_;  // Process noise for theta
   
   // 観測ノイズ共分散行列
-  R(0, 0) = var_imu_w_;   // Process noise for x
-  R(1, 1) = var_imu_w_;   // Process noise for y
-  R(2, 2) = var_imu_acc_; // Process noise for theta
+  R_ndt(0, 0) = var_imu_w_;   // Process noise for x
+  R_ndt(1, 1) = var_imu_w_;   // Process noise for y
+  R_ndt(2, 2) = var_imu_acc_; // Process noise for theta
+
+  // imuの観測ノイズ共分散行列
+  R_imu(0, 0) = var_imu_w_;   // Process noise for
+  R_imu(1, 1) = var_imu_w_;   // Process noise for
+  R_imu(2, 2) = var_imu_acc_; // Process noise for theta
 }
 
 
 void ExtendedKalmanFilter::init()
 {
-  X << 0, 0, 0;
-  initialized = true;
+  init(0.0, 0.0, 0.0);  
+}
+
+void ExtendedKalmanFilter::init(double x, double y, double theta)
+{
+  X << x, y, theta;
   prev_time_ = this->now();
+  RCLCPP_INFO(this->get_logger(), "initialized at position: x=%.2f, y=%.2f, theta=%.2f", x, y, theta);
 }
 
 
-void ExtendedKalmanFilter::odom_callback(const nav_msgs::msg::Odometry & msg)
+void ExtendedKalmanFilter::wheel_odom_callback(const nav_msgs::msg::Odometry & msg)
 {
-  if (!initialized) {
-    init();
-  } else {
-    nav_msgs::msg::Odometry odom_msg = msg; 
-    predictUpdate(odom_msg);
-  }
+  latest_wheel_odom_msg_ = msg;
+  if (!wheel_odom_init_) wheel_odom_init_ = true;
+}
+
+void ExtendedKalmanFilter::ndt_odom_callback(const nav_msgs::msg::Odometry & msg)
+{
+  latest_ndt_odom_msg_ = msg;
+  if (!ndt_odom_init_) ndt_odom_init_ = true;
 }
 
 void ExtendedKalmanFilter::imu_callback(const sensor_msgs::msg::Imu & msg)
 {
-  if (!initialized) {
-    init();
-  } else {
-    // measurementUpdate(msg);
-    try {
-      sensor_msgs::msg::Imu transformed_msg;
-      geometry_msgs::msg::Vector3Stamped acc_in, acc_out, w_in, w_out;
-      geometry_msgs::msg::QuaternionStamped orientation_in, orientation_out;
+  try {
+    sensor_msgs::msg::Imu transformed_msg;
+    geometry_msgs::msg::Vector3Stamped acc_in, acc_out, w_in, w_out;
+    geometry_msgs::msg::QuaternionStamped orientation_in, orientation_out;
 
-      acc_in.vector.x = msg.linear_acceleration.x;
-      acc_in.vector.y = msg.linear_acceleration.y;
-      acc_in.vector.z = msg.linear_acceleration.z;
-      w_in.vector.x = msg.angular_velocity.x;
-      w_in.vector.y = msg.angular_velocity.y;
-      w_in.vector.z = msg.angular_velocity.z;
-      orientation_in.quaternion = msg.orientation; 
-      orientation_in.header = msg.header; 
+    acc_in.vector.x = msg.linear_acceleration.x;
+    acc_in.vector.y = msg.linear_acceleration.y;
+    acc_in.vector.z = msg.linear_acceleration.z;
+    w_in.vector.x = msg.angular_velocity.x;
+    w_in.vector.y = msg.angular_velocity.y;
+    w_in.vector.z = msg.angular_velocity.z;
+    orientation_in.quaternion = msg.orientation; 
+    orientation_in.header = msg.header; 
 
-      tf2::TimePoint time_point = tf2::TimePoint(
-        std::chrono::seconds(msg.header.stamp.sec) +
-        std::chrono::nanoseconds(msg.header.stamp.nanosec));
-      const geometry_msgs::msg::TransformStamped transform =
-        tfbuffer_.lookupTransform(
-        robot_frame_id_,
-        msg.header.frame_id,
-        time_point);
-      tf2::doTransform(acc_in, acc_out, transform);
-      tf2::doTransform(w_in, w_out, transform);
-      tf2::doTransform(orientation_in, orientation_out, transform); //追加
+    tf2::TimePoint time_point = tf2::TimePoint(
+      std::chrono::seconds(msg.header.stamp.sec) +
+      std::chrono::nanoseconds(msg.header.stamp.nanosec));
+    const geometry_msgs::msg::TransformStamped transform =
+      tfbuffer_.lookupTransform(
+      robot_frame_id_,
+      msg.header.frame_id,
+      time_point);
+    tf2::doTransform(acc_in, acc_out, transform);
+    tf2::doTransform(w_in, w_out, transform);
+    tf2::doTransform(orientation_in, orientation_out, transform);
 
-      transformed_msg.header.stamp = msg.header.stamp;
-      transformed_msg.angular_velocity.x = w_out.vector.x;
-      transformed_msg.angular_velocity.y = w_out.vector.y;
-      transformed_msg.angular_velocity.z = w_out.vector.z;
-      transformed_msg.linear_acceleration.x = acc_out.vector.x;
-      transformed_msg.linear_acceleration.y = acc_out.vector.y;
-      transformed_msg.linear_acceleration.z = acc_out.vector.z; 
-      transformed_msg.orientation = orientation_out.quaternion; //追加
+    transformed_msg.header.stamp = msg.header.stamp;
+    transformed_msg.angular_velocity.x = w_out.vector.x;
+    transformed_msg.angular_velocity.y = w_out.vector.y;
+    transformed_msg.angular_velocity.z = w_out.vector.z;
+    transformed_msg.linear_acceleration.x = acc_out.vector.x;
+    transformed_msg.linear_acceleration.y = acc_out.vector.y;
+    transformed_msg.linear_acceleration.z = acc_out.vector.z; 
+    transformed_msg.orientation = orientation_out.quaternion;
 
-      measurementUpdate(transformed_msg);
-    } catch (tf2::TransformException & e) {
-      RCLCPP_ERROR(this->get_logger(), "%s", e.what());
-      return;
-    } catch (std::runtime_error & e) {
-      RCLCPP_ERROR(this->get_logger(), "%s", e.what());
-      return;
-    }
+    latest_imu_msg_ = transformed_msg;
+    if (!imu_init_) imu_init_ = true;
+  } catch (tf2::TransformException & e) {
+    RCLCPP_ERROR(this->get_logger(), "%s", e.what());
+    return;
+  } catch (std::runtime_error & e) {
+    RCLCPP_ERROR(this->get_logger(), "%s", e.what());
+    return;
   }
 }
 
+void ExtendedKalmanFilter::initial_pose_callback(const geometry_msgs::msg::PoseWithCovarianceStamped & msg)
+{
+  tf2::Quaternion q(
+    msg.pose.pose.orientation.x,
+    msg.pose.pose.orientation.y,
+    msg.pose.pose.orientation.z,
+    msg.pose.pose.orientation.w
+  );
+  tf2::Matrix3x3 m(q);
+  double roll, pitch, yaw;
+  m.getRPY(roll, pitch, yaw);
+  init(msg.pose.pose.position.x, msg.pose.pose.position.y, yaw);  
+}
+
+void ExtendedKalmanFilter::ekf_timer_callback()
+{
+  // 初期化されていない場合は何もしない
+  if (!wheel_odom_init_ || !ndt_odom_init_ || !imu_init_) {
+    RCLCPP_DEBUG(this->get_logger(), "Waiting for all sensor data to be initialized...");
+    return;
+  }
+  predictUpdate(latest_odom_msg_);  
+  measurementUpdate(latest_imu_msg_);
+
+  wheel_odom_init_ = false;
+  ndt_odom_init_ = false;
+  imu_init_ = false;
+}
 
 void ExtendedKalmanFilter::predictUpdate(const nav_msgs::msg::Odometry & msg)
 {
@@ -165,25 +225,27 @@ void ExtendedKalmanFilter::predictUpdate(const nav_msgs::msg::Odometry & msg)
   rclcpp::Duration duration = odomtimestamp - prev_time_;
   double dt = duration.seconds(); 
   prev_time_ = odomtimestamp;
-  v = msg.twist.twist.linear.x;
   
-  tf2::Quaternion q(
-            msg.pose.pose.orientation.x,
-            msg.pose.pose.orientation.y,
-            msg.pose.pose.orientation.z,
-            msg.pose.pose.orientation.w
-  );
-  tf2::Matrix3x3 m(q);
-  double roll, pitch, yaw;
-  m.getRPY(roll, pitch, yaw);
-  X(0) = msg.pose.pose.position.x;
-  X(1) = msg.pose.pose.position.y;
-  X(2) = yaw;
+  // オドメトリから速度と角速度を取得
+  v = msg.twist.twist.linear.x;
+  double omega = msg.twist.twist.angular.z;
+  
+  // 現在の姿勢を取得
+  double current_theta = X(2);
+  
+  // 運動モデルによる状態予測（プロセスノイズを含む）
+  X(0) = X(0) + v * cos(current_theta) * dt;  // x位置の予測
+  X(1) = X(1) + v * sin(current_theta) * dt;  // y位置の予測  
+  X(2) = X(2) + omega * dt;                   // 姿勢角の予測
+  
+  // 角度を-πからπの範囲に正規化
+  while (X(2) > M_PI) X(2) -= 2.0 * M_PI;
+  while (X(2) < -M_PI) X(2) += 2.0 * M_PI;
 
-  //2.ヤコビアン計算
+  //2.ヤコビアン計算（運動モデルの線形化）
   Matrix3d F;
-  F << 1, 0, -v*sin(yaw)*dt ,
-        0, 1,  v*cos(yaw)*dt ,
+  F << 1, 0, -v*sin(current_theta)*dt ,
+        0, 1,  v*cos(current_theta)*dt ,
         0, 0, 1;
 
   //3.事前誤差共分散行列の推定
