@@ -88,10 +88,6 @@ ExtendedKalmanFilter::ExtendedKalmanFilter(const rclcpp::NodeOptions & options)
   // タイマーの設定
   auto timer_period = std::chrono::milliseconds(static_cast<int>(1000.0 / ekf_frequency_));
   ekf_timer_ = this->create_wall_timer(timer_period, std::bind(&ExtendedKalmanFilter::ekf_timer_callback, this));
-
-  // データフラグの初期化
-  has_odom_data_ = false;
-  has_imu_data_ = false;
   
   P_(0, 0) = 0.1;  
   P_(1, 1) = 0.1;  
@@ -130,14 +126,9 @@ void ExtendedKalmanFilter::init(double x, double y, double theta)
 void ExtendedKalmanFilter::wheel_odom_callback(const nav_msgs::msg::Odometry & msg)
 {
   try {
-    nav_msgs::msg::Odometry transformed_msg;
-    geometry_msgs::msg::TwistStamped twist_in, twist_out;
+    nav_msgs::msg::Odometry transformed_msg = msg;
     geometry_msgs::msg::PoseStamped pose_in, pose_out;
 
-    // Twist情報の変換
-    twist_in.header = msg.header;
-    twist_in.twist = msg.twist.twist;
-    
     // Pose情報の変換
     pose_in.header = msg.header;
     pose_in.pose = msg.pose.pose;
@@ -150,8 +141,6 @@ void ExtendedKalmanFilter::wheel_odom_callback(const nav_msgs::msg::Odometry & m
       robot_frame_id_,
       msg.header.frame_id,
       time_point);
-    
-    tf2::doTransform(twist_in, twist_out, transform);
     tf2::doTransform(pose_in, pose_out, transform);
 
     transformed_msg.header.stamp = msg.header.stamp;
@@ -159,8 +148,8 @@ void ExtendedKalmanFilter::wheel_odom_callback(const nav_msgs::msg::Odometry & m
     transformed_msg.child_frame_id = msg.child_frame_id;
     transformed_msg.pose.pose = pose_out.pose;
     transformed_msg.pose.covariance = msg.pose.covariance;
-    transformed_msg.twist.twist = twist_out.twist;
-    transformed_msg.twist.covariance = msg.twist.covariance;
+    // twistは元のデータをそのまま使用
+    transformed_msg.twist = msg.twist;
 
     latest_wheel_odom_msg_ = transformed_msg;
     if (!wheel_odom_received_) wheel_odom_received_ = true;
@@ -176,14 +165,9 @@ void ExtendedKalmanFilter::wheel_odom_callback(const nav_msgs::msg::Odometry & m
 void ExtendedKalmanFilter::ndt_odom_callback(const nav_msgs::msg::Odometry & msg)
 {
   try {
-    nav_msgs::msg::Odometry transformed_msg;
-    geometry_msgs::msg::TwistStamped twist_in, twist_out;
+    nav_msgs::msg::Odometry transformed_msg = msg;
     geometry_msgs::msg::PoseStamped pose_in, pose_out;
 
-    // Twist情報の変換
-    twist_in.header = msg.header;
-    twist_in.twist = msg.twist.twist;
-    
     // Pose情報の変換
     pose_in.header = msg.header;
     pose_in.pose = msg.pose.pose;
@@ -197,7 +181,6 @@ void ExtendedKalmanFilter::ndt_odom_callback(const nav_msgs::msg::Odometry & msg
       msg.header.frame_id,
       time_point);
     
-    tf2::doTransform(twist_in, twist_out, transform);
     tf2::doTransform(pose_in, pose_out, transform);
 
     transformed_msg.header.stamp = msg.header.stamp;
@@ -205,10 +188,10 @@ void ExtendedKalmanFilter::ndt_odom_callback(const nav_msgs::msg::Odometry & msg
     transformed_msg.child_frame_id = msg.child_frame_id;
     transformed_msg.pose.pose = pose_out.pose;
     transformed_msg.pose.covariance = msg.pose.covariance;
-    transformed_msg.twist.twist = twist_out.twist;
-    transformed_msg.twist.covariance = msg.twist.covariance;
+    // twistは元のデータをそのまま使用
+    transformed_msg.twist = msg.twist;
 
-    latest_ndt_odom_msg_ = transformed_msg;
+    latest_ndt_msg_ = transformed_msg;
     if (!ndt_odom_received_) ndt_odom_received_ = true;
     
     // NDTデータ受信時刻を更新
@@ -295,7 +278,7 @@ void ExtendedKalmanFilter::ekf_timer_callback()
   rclcpp::Duration duration = this->now() - prev_time_;
   double dt = duration.seconds();
   predictUpdate(dt); 
-  measurementUpdate(latest_imu_msg_, dt);
+  measurementUpdate(dt);
 
   wheel_odom_received_ = false;
   ndt_odom_received_ = false;
@@ -318,8 +301,8 @@ void ExtendedKalmanFilter::predictUpdate(double dt)
   */
 
   //1.運動モデルによる予測(事前推定値)
-  float v = latest_odom_msg_.twist.twist.linear.x;
-  double omega = latest_odom_msg_.twist.twist.angular.z;
+  float v = latest_wheel_odom_msg_.twist.twist.linear.x;
+  double omega = latest_wheel_odom_msg_.twist.twist.angular.z;
   double pre_theta = Pre_X(2);
   
   // 運動モデルによる状態予測（プロセスノイズを含む）
@@ -356,14 +339,14 @@ void ExtendedKalmanFilter::measurementUpdate(double dt)
   rclcpp::Duration time_since_last_ndt = this->now() - last_ndt_time_;
   bool use_ndt = time_since_last_ndt.seconds() <= ndt_timeout_duration_;  
   if (use_ndt) {
-    update_with_ndt(double dt);
+    update_with_ndt(dt);
   } else {
-    update_with_imu(double dt);
+    update_with_imu(dt);
   }
 
   // publish pose_ekf
   geometry_msgs::msg::PoseWithCovarianceStamped pose_ekf;
-  pose_ekf.header.stamp = imutimestamp;
+  pose_ekf.header.stamp = this->now();
   pose_ekf.header.frame_id = map_frame_id_;
   pose_ekf.pose.pose.position.x = X(0);
   pose_ekf.pose.pose.position.y = X(1);

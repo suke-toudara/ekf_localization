@@ -35,7 +35,7 @@ private:
   std::vector<double> var_imu_;
   std::vector<double> var_wheel_odom_;
   std::vector<double> var_ndt_odom_;
-  MatrixXd Q_wheel_ = MatrixXd::Zero(3, 3);;
+  MatrixXd Q_wheel_ = MatrixXd::Zero(3, 3);
   MatrixXd R_ndt_ = MatrixXd::Zero(3, 3);
   MatrixXd R_imu_ = MatrixXd::Zero(3, 3);
 
@@ -80,8 +80,8 @@ private:
   double ekf_frequency_;
   
   nav_msgs::msg::Odometry latest_wheel_odom_msg_;
-  nav_msgs::msg::Odometry latest_ndt_odom_msg_;
-  nav_msgs::msg::Odometry previous_ndt_odom_msg_;
+  nav_msgs::msg::Odometry latest_ndt_msg_;
+  nav_msgs::msg::Odometry previous_ndt_msg_;
   sensor_msgs::msg::Imu latest_imu_msg_;
   bool wheel_odom_received_;
   bool ndt_odom_received_;
