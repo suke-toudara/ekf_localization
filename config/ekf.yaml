@@ -1,14 +1,16 @@
 /**:
   ros__parameters:
-    reference_frame_id: "map"
+    map_frame_id: "map"
     robot_frame_id: "base_link"
-    imu_topic: "imu/data" #"/camera/camera/imu"
-    odom_topic: "odom"
-    pub_period: 10
-    var_imu_w: 0.01
-    var_imu_acc: 0.01
-    var_gnss: 0.1
-    var_odom: 0.1
-    use_gnss: true
-    use_odom: false
-    broadcast_transform : true
+    broadcast_transform: true
+    
+    # EKF更新周波数 (Hz)
+    ekf_frequency: 10.0
+    
+    # NDTタイムアウト時間 (秒)
+    ndt_timeout_duration: 1.0
+    
+    # ノイズ分散パラメータ [x, y, theta]
+    var_imu: [0.05, 0.05, 0.1]          # IMUの観測ノイズ分散 [x, y, theta]
+    var_wheel_odom: [0.1, 0.1, 0.2]     # 車輪オドメトリのプロセスノイズ分散 [x, y, theta]
+    var_ndt_odom: [0.02, 0.02, 0.05]    # NDTオドメトリの観測ノイズ分散 [x, y, theta]

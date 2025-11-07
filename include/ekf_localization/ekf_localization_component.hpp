@@ -32,9 +32,9 @@ private:
   Eigen::Vector3d Z; 
 
   // noise_pram
-  float var_imu_w_;
-  float var_imu_acc_;
-  float var_odom_xyz_ = 0.05;
+  std::vector<double> var_imu_;
+  std::vector<double> var_wheel_odom_;
+  std::vector<double> var_ndt_odom_;
   MatrixXd Q_wheel_ = MatrixXd::Zero(3, 3);;
   MatrixXd R_ndt_ = MatrixXd::Zero(3, 3);
   MatrixXd R_imu_ = MatrixXd::Zero(3, 3);
@@ -70,11 +70,6 @@ private:
 
   std::string map_frame_id_;
   std::string robot_frame_id_;
-  std::string initial_pose_topic_;
-  std::string ekf_pose_topic_;
-  std::string imu_topic_;
-  std::string odom_topic_;
-  std::string ndt_topic_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr wheel_odom_subscription_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr ndt_odom_subscription_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_subscription_;

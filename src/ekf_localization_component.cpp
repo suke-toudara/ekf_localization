@@ -18,30 +18,44 @@ ExtendedKalmanFilter::ExtendedKalmanFilter(const rclcpp::NodeOptions & options)
 {
   declare_parameter("map_frame_id", "map");
   declare_parameter("robot_frame_id", "base_link");
-  declare_parameter("initial_pose_topic","/initial_pose");
-  declare_parameter("ekf_pose_topic","/estimated_pose");
-  declare_parameter("imu_topic","/imu");
-  declare_parameter("odom_topic","/odom");
   declare_parameter("broadcast_transform", true);
   
   get_parameter("map_frame_id", map_frame_id_);
   get_parameter("robot_frame_id", robot_frame_id_);
-  get_parameter("initial_pose_topic", initial_pose_topic_);
-  get_parameter("ekf_pose_topic", ekf_pose_topic_);
-  get_parameter("imu_topic", imu_topic_);
-  get_parameter("odom_topic", odom_topic_);
   get_parameter("broadcast_transform", broadcast_transform_);
 
-  declare_parameter("var_imu_w", 0.1);
-  declare_parameter("var_imu_acc", 0.01);
-  declare_parameter("var_odom_xyz", 0.1);
-  declare_parameter("ekf_frequency", 50.0);  // EKFの更新周波数 (Hz)
+  declare_parameter("var_imu", std::vector<double>{0.1, 0.1, 0.1});
+  declare_parameter("var_wheel_odom", std::vector<double>{0.1, 0.1, 0.1});
+  declare_parameter("var_ndt_odom", std::vector<double>{0.1, 0.1, 0.1});
+  declare_parameter("ekf_frequency", 10.0);        // EKFの更新周波数 (Hz)
   declare_parameter("ndt_timeout_duration", 1.0);  // NDTタイムアウト時間 (秒)
-  get_parameter("var_imu_w", var_imu_w_);
-  get_parameter("var_imu_acc", var_imu_acc_);
-  get_parameter("var_odom_xyz", var_odom_xyz_);
+  get_parameter("var_imu", var_imu_);
+  get_parameter("var_wheel_odom", var_wheel_odom_);
+  get_parameter("var_ndt_odom", var_ndt_odom_);
   get_parameter("ekf_frequency", ekf_frequency_);
   get_parameter("ndt_timeout_duration", ndt_timeout_duration_);
+
+  // パラメータベクトルサイズの検証
+  if (var_imu_.size() != 3) {
+    RCLCPP_ERROR(this->get_logger(), "var_imu must have exactly 3 elements [x, y, theta]");
+    var_imu_ = {0.1, 0.1, 0.1};
+  }
+  if (var_wheel_odom_.size() != 3) {
+    RCLCPP_ERROR(this->get_logger(), "var_wheel_odom must have exactly 3 elements [x, y, theta]");
+    var_wheel_odom_ = {0.1, 0.1, 0.1};
+  }
+  if (var_ndt_odom_.size() != 3) {
+    RCLCPP_ERROR(this->get_logger(), "var_ndt_odom must have exactly 3 elements [x, y, theta]");
+    var_ndt_odom_ = {0.1, 0.1, 0.1};
+  }
+
+  // パラメータ値のログ出力
+  RCLCPP_INFO(this->get_logger(), "IMU noise variance: [%.3f, %.3f, %.3f]", 
+              var_imu_[0], var_imu_[1], var_imu_[2]);
+  RCLCPP_INFO(this->get_logger(), "Wheel odom noise variance: [%.3f, %.3f, %.3f]", 
+              var_wheel_odom_[0], var_wheel_odom_[1], var_wheel_odom_[2]);
+  RCLCPP_INFO(this->get_logger(), "NDT odom noise variance: [%.3f, %.3f, %.3f]", 
+              var_ndt_odom_[0], var_ndt_odom_[1], var_ndt_odom_[2]);
 
   init();
   auto qos = rclcpp::QoS(rclcpp::QoSInitialization::from_rmw(rmw_qos_profile_sensor_data));
@@ -52,22 +66,22 @@ ExtendedKalmanFilter::ExtendedKalmanFilter(const rclcpp::NodeOptions & options)
 
   // subscriber
   wheel_odom_subscription_ = create_subscription<nav_msgs::msg::Odometry>(
-      odom_topic_, 10, [this](const nav_msgs::msg::Odometry & msg) {
+      "wheel_odom", 10, [this](const nav_msgs::msg::Odometry & msg) {
       wheel_odom_callback(msg);
       });
 
   ndt_odom_subscription_ = create_subscription<nav_msgs::msg::Odometry>(
-      odom_topic_, 10, [this](const nav_msgs::msg::Odometry & msg) {
+      "ndt_odom", 10, [this](const nav_msgs::msg::Odometry & msg) {
       ndt_odom_callback(msg);
       });
 
   imu_subscription_ = create_subscription<sensor_msgs::msg::Imu>(
-      imu_topic_, 10, [this](const sensor_msgs::msg::Imu & msg) {
+      "imu", 10, [this](const sensor_msgs::msg::Imu & msg) {
       imu_callback(msg);
       });
 
   initial_pose_subscription_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
-      initial_pose_topic_, 10, [this](const geometry_msgs::msg::PoseWithCovarianceStamped & msg) {
+      "initial_pose", 10, [this](const geometry_msgs::msg::PoseWithCovarianceStamped & msg) {
       initial_pose_callback(msg);
       });
 
@@ -84,19 +98,19 @@ ExtendedKalmanFilter::ExtendedKalmanFilter(const rclcpp::NodeOptions & options)
   P_(2, 2) = 0.1;  
   
   // プロセスノイズ共分散行列(車輪odomのノイズ)
-  Q_wheel_(0, 0) = var_odom_xyz_;  // Process noise for x
-  Q_wheel_(1, 1) = var_odom_xyz_;  // Process noise for y
-  Q_wheel_(2, 2) = var_odom_xyz_;  // Process noise for theta
+  Q_wheel_(0, 0) = var_wheel_odom_[0];  // Process noise for x
+  Q_wheel_(1, 1) = var_wheel_odom_[1];  // Process noise for y
+  Q_wheel_(2, 2) = var_wheel_odom_[2];  // Process noise for theta
   
-  // 観測ノイズ共分散行列
-  R_ndt(0, 0) = var_imu_w_;   // Process noise for x
-  R_ndt(1, 1) = var_imu_w_;   // Process noise for y
-  R_ndt(2, 2) = var_imu_acc_; // Process noise for theta
+  // 観測ノイズ共分散行列(NDT)
+  R_ndt_(0, 0) = var_ndt_odom_[0];   // Observation noise for x
+  R_ndt_(1, 1) = var_ndt_odom_[1];   // Observation noise for y
+  R_ndt_(2, 2) = var_ndt_odom_[2];   // Observation noise for theta
 
   // imuの観測ノイズ共分散行列
-  R_imu(0, 0) = var_imu_w_;   // Process noise for
-  R_imu(1, 1) = var_imu_w_;   // Process noise for
-  R_imu(2, 2) = var_imu_acc_; // Process noise for theta
+  R_imu_(0, 0) = var_imu_[0];   // Observation noise for x
+  R_imu_(1, 1) = var_imu_[1];   // Observation noise for y
+  R_imu_(2, 2) = var_imu_[2];   // Observation noise for theta
 }
 
 
@@ -411,7 +425,7 @@ void ExtendedKalmanFilter::update_with_ndt(double dt)
   Eigen::VectorXd Y = Z - h * X;
 
   //3.カルマンゲインの計算
-  MatrixXd S = H_ * P_ * H_.transpose() + R_;
+  MatrixXd S = H_ * P_ * H_.transpose() + R_ndt_;
   MatrixXd K = P_ * H_.transpose() * S.inverse();
 
   //3.観測予測値の計算
@@ -442,7 +456,7 @@ void ExtendedKalmanFilter::update_with_imu(double dt)
   Eigen::VectorXd Y = Z - h * X;
 
   //3.カルマンゲインの計算
-  MatrixXd S = H_ * P_ * H_.transpose() + R_;
+  MatrixXd S = H_ * P_ * H_.transpose() + R_imu_;
   MatrixXd K = P_ * H_.transpose() * S.inverse();
 
   //3.観測予測値の計算

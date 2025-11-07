@@ -2,8 +2,12 @@
 <launch>
   <node_container pkg="rclcpp_components" exec="component_container" name="ekf_localization_container" namespace="ekf_localization_container" >
     <composable_node pkg="ekf_localization" plugin="ekf_localization::ExtendedKalmanFilter" name="ekf_localization_node"> 
-      <!-- namespace="ekf_localization"> -->
       <param from="$(find-pkg-share ekf_localization)/config/ekf.yaml" />
+      <remapping from="/imu" to="/sensor/imu/data" />
+      <remapping from="/wheel_odom" to="/sensor/wheel/odom" />
+      <remapping from="/ndt_odom" to="/sensor/ndt/odom" />
+      <remapping from="/initial_pose" to="/initialpose" />
+      <remapping from="/estimated_pose" to="/localization/ekf/pose" />
     </composable_node>
   </node_container>
 </launch>
